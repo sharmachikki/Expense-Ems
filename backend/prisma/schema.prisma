@@ -1,0 +1,478 @@
+// Expense Easy — database schema
+// Tables follow the list in "Full Stack Application Architecture & Deployment Plan" §3.
+// Role + approval-authority modeling follows "Role-Based Menu Visibility & Authorization".
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+// Primary role. Approval authority is tracked SEPARATELY on User.isApprovingAuthority
+// per the spec's explicit requirement: "Manager / HOD Approvals must NOT be
+// restricted only by role name."
+enum RoleName {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  FINANCE_HEAD
+  MANAGER
+  HOD
+  EMPLOYEE
+}
+
+enum ExpenseStatus {
+  DRAFT
+  SUBMITTED
+  MANAGER_APPROVED
+  HOD_APPROVED
+  FINANCE_APPROVED
+  SETTLED
+  REJECTED
+  DISPUTED
+}
+
+enum ApprovalDecision {
+  APPROVED
+  REJECTED
+  RETURNED
+}
+
+enum NotificationChannel {
+  IN_APP
+  EMAIL
+}
+
+// ---------------------------------------------------------------------------
+// Core: companies / branches / users / roles / permissions
+// ---------------------------------------------------------------------------
+
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  logoUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches  Branch[]
+  employees Employee[]
+  users     User[]
+  settings  Setting[]
+
+  @@map("companies")
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  code      String
+  createdAt DateTime @default(now())
+
+  company   Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  employees Employee[]
+  expenses  Expense[]
+
+  @@unique([companyId, code])
+  @@map("branches")
+}
+
+model Role {
+  id          String   @id @default(cuid())
+  name        RoleName @unique
+  description String?
+
+  users           UserRole[]
+  rolePermissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          String @id @default(cuid())
+  key         String @unique // e.g. "MASTERS_POLICY", "ACCOUNTING_SYNC"
+  description String?
+
+  rolePermissions RolePermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  roleId       String
+  permissionId String
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+model User {
+  id                   String   @id @default(cuid())
+  companyId            String?
+  email                String   @unique
+  passwordHash         String
+  fullName             String
+  // Independent of primary role — drives Manager/HOD Approvals visibility.
+  isApprovingAuthority Boolean  @default(false)
+  isActive             Boolean  @default(true)
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  company           Company?           @relation(fields: [companyId], references: [id])
+  roles             UserRole[]
+  employee          Employee?
+  refreshSessions   Session[]
+  loginAttempts     LoginAttempt[]
+  passwordResets    PasswordReset[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]
+  activityLogs      ActivityLog[]
+  apiTokens         ApiToken[]
+  expensesSubmitted Expense[]          @relation("ExpenseEmployee")
+  approvalsGiven    ExpenseApproval[]  @relation("ApprovalActor")
+  bulkReports       BulkReport[]
+
+  @@map("users")
+}
+
+// Many-to-many: a user can carry more than one role (edge case explicitly
+// called out in the spec — "User has multiple roles").
+model UserRole {
+  userId String
+  roleId String
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model Employee {
+  id           String  @id @default(cuid())
+  userId       String  @unique
+  companyId    String
+  branchId     String?
+  employeeCode String
+  department   String?
+  designation  String?
+  managerId    String?
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company  @relation(fields: [companyId], references: [id])
+  branch  Branch?  @relation(fields: [branchId], references: [id])
+  manager Employee? @relation("EmployeeManager", fields: [managerId], references: [id])
+  reports Employee[] @relation("EmployeeManager")
+
+  @@unique([companyId, employeeCode])
+  @@map("employees")
+}
+
+// ---------------------------------------------------------------------------
+// Expenses / declaration vouchers / bulk reports / approvals
+// ---------------------------------------------------------------------------
+
+model Expense {
+  id          String        @id @default(cuid())
+  employeeId  String
+  branchId    String?
+  status      ExpenseStatus @default(DRAFT)
+  purpose     String
+  payTo       String?
+  totalAmount Decimal       @db.Decimal(14, 2)
+  submittedAt DateTime?
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  employee   User              @relation("ExpenseEmployee", fields: [employeeId], references: [id])
+  branch     Branch?           @relation(fields: [branchId], references: [id])
+  items      ExpenseItem[]
+  approvals  ExpenseApproval[]
+  attachments ReportAttachment[]
+
+  @@index([employeeId])
+  @@index([branchId])
+  @@index([status])
+  @@map("expenses")
+}
+
+model ExpenseItem {
+  id          String  @id @default(cuid())
+  expenseId   String
+  description String
+  category    String?
+  amount      Decimal @db.Decimal(14, 2)
+  date        DateTime
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+
+  @@map("expense_items")
+}
+
+model ExpenseApproval {
+  id         String           @id @default(cuid())
+  expenseId  String
+  actorId    String
+  stage      String // e.g. MANAGER, HOD, FINANCE
+  decision   ApprovalDecision
+  comment    String?
+  decidedAt  DateTime         @default(now())
+
+  expense Expense @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  actor   User    @relation("ApprovalActor", fields: [actorId], references: [id])
+
+  @@map("expense_approvals")
+}
+
+model DeclarationVoucher {
+  id          String   @id @default(cuid())
+  date        DateTime
+  branchId    String?
+  description String
+  purpose     String
+  amount      Decimal  @db.Decimal(14, 2)
+  payTo       String
+  createdAt   DateTime @default(now())
+
+  items DeclarationItem[]
+
+  @@map("declaration_vouchers")
+}
+
+model DeclarationItem {
+  id         String  @id @default(cuid())
+  voucherId  String
+  label      String
+  amount     Decimal @db.Decimal(14, 2)
+
+  voucher DeclarationVoucher @relation(fields: [voucherId], references: [id], onDelete: Cascade)
+
+  @@map("declaration_items")
+}
+
+model BulkReport {
+  id         String   @id @default(cuid())
+  employeeId String
+  createdAt  DateTime @default(now())
+
+  employee    User               @relation(fields: [employeeId], references: [id])
+  items       BulkReportItem[]
+  attachments ReportAttachment[]
+
+  @@index([employeeId])
+  @@map("bulk_reports")
+}
+
+model BulkReportItem {
+  id           String  @id @default(cuid())
+  bulkReportId String
+  description  String
+  amount       Decimal @db.Decimal(14, 2)
+  date         DateTime
+
+  bulkReport BulkReport @relation(fields: [bulkReportId], references: [id], onDelete: Cascade)
+
+  @@map("bulk_report_items")
+}
+
+model ReportAttachment {
+  id           String  @id @default(cuid())
+  expenseId    String?
+  bulkReportId String?
+  fileUrl      String
+  fileName     String
+  mimeType     String
+
+  expense    Expense?    @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  bulkReport BulkReport? @relation(fields: [bulkReportId], references: [id], onDelete: Cascade)
+
+  @@map("report_attachments")
+}
+
+// ---------------------------------------------------------------------------
+// Notifications / audit / activity / API tokens / webhooks
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id        String              @id @default(cuid())
+  userId    String
+  channel   NotificationChannel @default(IN_APP)
+  title     String
+  body      String
+  createdAt DateTime            @default(now())
+
+  user  User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reads NotificationRead[]
+
+  @@index([userId])
+  @@map("notifications")
+}
+
+model NotificationRead {
+  notificationId String
+  userId         String
+  readAt         DateTime @default(now())
+
+  notification Notification @relation(fields: [notificationId], references: [id], onDelete: Cascade)
+
+  @@id([notificationId, userId])
+  @@index([userId])
+  @@map("notification_reads")
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  action    String
+  entity    String?
+  entityId  String?
+  metadata  Json?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  userId    String?
+  message   String
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@map("activity_logs")
+}
+
+model ApiToken {
+  id        String    @id @default(cuid())
+  userId    String
+  name      String
+  tokenHash String    @unique
+  lastUsed  DateTime?
+  expiresAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  logs ApiLog[]
+
+  @@map("api_tokens")
+}
+
+model ApiKey {
+  id        String   @id @default(cuid())
+  name      String
+  keyHash   String   @unique
+  createdAt DateTime @default(now())
+
+  @@map("api_keys")
+}
+
+model ApiLog {
+  id         String   @id @default(cuid())
+  apiTokenId String?
+  method     String
+  path       String
+  statusCode Int
+  createdAt  DateTime @default(now())
+
+  apiToken ApiToken? @relation(fields: [apiTokenId], references: [id])
+
+  @@map("api_logs")
+}
+
+model Webhook {
+  id        String   @id @default(cuid())
+  url       String
+  secret    String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  events WebhookEvent[]
+
+  @@map("webhooks")
+}
+
+model WebhookEvent {
+  id        String   @id @default(cuid())
+  webhookId String
+  eventType String
+  payload   Json
+  deliveredAt DateTime?
+  createdAt DateTime @default(now())
+
+  webhook Webhook @relation(fields: [webhookId], references: [id], onDelete: Cascade)
+
+  @@map("webhook_events")
+}
+
+// ---------------------------------------------------------------------------
+// Auth support tables
+// ---------------------------------------------------------------------------
+
+model PasswordReset {
+  id        String   @id @default(cuid())
+  userId    String
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("password_resets")
+}
+
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  userId    String?
+  email     String
+  success   Boolean
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  user User? @relation(fields: [userId], references: [id])
+
+  @@index([email])
+  @@map("login_attempts")
+}
+
+// Refresh-token sessions (rotation-friendly: one row per issued refresh token).
+model Session {
+  id               String    @id @default(cuid())
+  userId           String
+  refreshTokenHash String    @unique
+  userAgent        String?
+  ipAddress        String?
+  revokedAt        DateTime?
+  expiresAt        DateTime
+  createdAt        DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+model Setting {
+  id        String  @id @default(cuid())
+  companyId String?
+  key       String
+  value     Json
+
+  company Company? @relation(fields: [companyId], references: [id])
+
+  @@unique([companyId, key])
+  @@map("settings")
+}

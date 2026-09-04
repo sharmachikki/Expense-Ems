@@ -1,0 +1,67 @@
+/* Ported from EMS-ExpenseEasy33.html §1 Design Tokens. Keep these in sync
+   with tailwind.config.ts's `colors` extension — the CSS vars are used
+   directly in a few places (gradients, box-shadows) where a Tailwind
+   utility can't express the same value. */
+
+:root {
+  --ink: #1b2430;
+  --ink-soft: #2a3645;
+  --paper: #f7f5f0;
+  --paper-dim: #efebe2;
+  --slate: #5c6b7a;
+  --slate-light: #8c99a6;
+  --line: #d9d3c6;
+
+  --gold: #b8860b;
+  --gold-soft: #e8d9b0;
+
+  --green: #2f6b4f;
+  --green-bg: #e6efe9;
+  --amber: #9a6a14;
+  --amber-bg: #f4e9d2;
+  --red: #a8412c;
+  --red-bg: #f3e2dd;
+
+  --purple: #5b4b8a;
+  --purple-bg: #efeaf6;
+  --teal: #2f6b6b;
+  --teal-bg: #e3eeee;
+
+  --radius: 2px;
+  --sidebar-w: 240px;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Inter', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+h4,
+.serif {
+  font-family: 'Source Serif 4', serif;
+  font-weight: 600;
+}
+
+.mono {
+  font-family: 'IBM Plex Mono', monospace;
+}
